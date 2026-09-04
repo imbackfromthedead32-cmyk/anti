@@ -25,7 +25,18 @@ client.once('ready', async () => {
         )
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator | PermissionFlagsBits.ManageGuild);
 
-    await client.application.commands.set([trackCommand]);
+    const requestDeletionCommand = new SlashCommandBuilder()
+        .setName('requestdeletion')
+        .setDescription('Send a bot-removal recommendation to the designated tracking channel.')
+        .addStringOption(option =>
+            option.setName('note')
+                .setDescription('The personalized note from the bot owner.')
+                .setRequired(true)
+        );
+
+    // Both commands are registered globally.
+    // /requestdeletion can therefore be used from DMs as well as servers.
+    await client.application.commands.set([trackCommand, requestDeletionCommand]);
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -39,6 +50,55 @@ client.on('interactionCreate', async (interaction) => {
             content: `🛡️ Now tracking **${targetChannel.name}**. Any message sent here will trigger an immediate quarantine response.`,
             ephemeral: true
         });
+        return;
+    }
+
+    if (interaction.commandName === 'requestdeletion') {
+        const OWNER_ID = '1487565352815694015';
+        const GUILD_ID = '1367616713335767152';
+        const CHANNEL_ID = '1367616713335767155';
+
+        // Only the bot owner can use this command.
+        if (interaction.user.id !== OWNER_ID) {
+            await interaction.reply({
+                content: '❌ You are not authorized to use this command.',
+                ephemeral: true
+            });
+            return;
+        }
+
+        const note = interaction.options.getString('note', true);
+
+        // Fetch the designated channel.
+        const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+
+        if (!channel || channel.guildId !== GUILD_ID || !channel.isTextBased()) {
+            await interaction.reply({
+                content: '❌ The designated tracking channel could not be found or is not a text channel.',
+                ephemeral: true
+            });
+            return;
+        }
+
+        const message =
+            'The bot owner has recommended that this bot is removed from the server, aswell as the designated channel used for tracking. ' +
+            'BOT OWNER NOTE: ' + note;
+
+        try {
+            await channel.send(message);
+
+            await interaction.reply({
+                content: '✅ The deletion request was sent to the designated tracking channel.',
+                ephemeral: true
+            });
+        } catch (err) {
+            console.error(`Failed to send deletion request: ${err.message}`);
+
+            await interaction.reply({
+                content: '❌ I could not send the deletion request to the designated channel.',
+                ephemeral: true
+            });
+        }
     }
 });
 
@@ -47,7 +107,7 @@ client.on('messageCreate', async (message) => {
     if (!message.guild) return;
 
     const trackedChannelId = trackedChannels.get(message.guild.id);
-    
+
     if (message.channel.id !== trackedChannelId) return;
 
     const member = message.member;
@@ -63,8 +123,11 @@ client.on('messageCreate', async (message) => {
     if (!member) return;
 
     try {
-        const invite = await message.channel.createInvite({ maxAge: 86400, maxUses: 1 });
-        
+        const invite = await message.channel.createInvite({
+            maxAge: 86400,
+            maxUses: 1
+        });
+
         const dmEmbed = new EmbedBuilder()
             .setColor('#FF0000')
             .setTitle('Account Breach Detected')
@@ -84,22 +147,29 @@ client.on('messageCreate', async (message) => {
             try {
                 const messages = await channel.messages.fetch({ limit: 50 });
                 const userMessages = messages.filter(m => m.author.id === author.id);
-                
+
                 if (userMessages.size > 0) {
                     await channel.bulkDelete(userMessages, true);
                 }
             } catch (err) {
-                
+
             }
         }
     });
 
     try {
         if (member.kickable) {
-            await member.kick('Automated Bot Mitigation Sync: Triggered honeypot tracking channel.');
-            console.log(`Successfully kicked suspected bot account: ${author.tag}`);
+            await member.kick(
+                'Automated Bot Mitigation Sync: Triggered honeypot tracking channel.'
+            );
+
+            console.log(
+                `Successfully kicked suspected bot account: ${author.tag}`
+            );
         } else {
-            console.log(`Cannot kick ${author.tag}: Missing Role Hierarchy permissions.`);
+            console.log(
+                `Cannot kick ${author.tag}: Missing Role Hierarchy permissions.`
+            );
         }
     } catch (err) {
         console.error(`Failed to kick member: ${err.message}`);
