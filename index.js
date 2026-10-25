@@ -19,6 +19,12 @@ const RAVAROS_GIF =
 const MAGICAE_GIF =
   "https://cdn.discordapp.com/attachments/1235588110885195838/1563684049338236990/2c594ac0f2ce24de961c23570f2c3fd0.gif?ex=6ade85c1&is=6add3441&hm=e8bdf868044c047390813896ac204ee09241536bda90694e10b54c27ae46c563&";
 
+const LEADER_USERNAMES = new Set([
+  "miranda00946",
+  "maisieisbored",
+  "clovilla",
+]);
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -28,55 +34,9 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
-// Channeling is reset when the bot restarts.
-const channelledUsers = new Set();
-
-const SPELLS = [
-  {
-    name: "Silencio",
-    effect: "Times out a target for 5 minutes.",
-  },
-  {
-    name: "Pontem Praesido Anchora Immortalibus",
-    effect: "Removes a timeout from a target.",
-  },
-  {
-    name: "Phasmatos Somnus",
-    effect: "Places a target in a 1-minute magical sleep.",
-  },
-  {
-    name: "The Power of Three Will Set Us Free",
-    effect: "Bans a target from the server.",
-  },
-  {
-    name: "Phasmatos Redux Redismo Sus Terra",
-    effect: "Kicks a target from the server.",
-  },
-  {
-    name: "Phasmatos Ravaros",
-    effect: "Deletes the message you are replying to.",
-  },
-  {
-    name: "Phasmatos Devos Male",
-    effect: "Deletes up to 5 recent messages from the replied-to user.",
-  },
-  {
-    name: "Harae Tamae Kioku Yomigaerashi Tamae",
-    effect: "Purges up to 50 recent messages from the current channel.",
-  },
-];
-
-const OWNER_ONLY = new Set([
-  "SPIRITUS IMMORTALITIS",
-  "PHASMATOS MAGICAE",
-  "PHASMATOS RAVAROS ON ANIMUM",
-  "THE POWER OF THREE WILL SET US FREE",
-  "PHASMATOS REDUX REDISMO SUS TERRA",
-  "HARAE TAMAE KIOKU YOMIGAERASHI TAMAE",
-  "PHASMATOS DEVOS MALE",
-  "PHASMATOS RAVAROS",
-  "PONTEM PRAESIDO ANCHORA IMMORTALIBUS",
-]);
+// These are in-memory permissions and reset when the bot restarts.
+const channelledWitches = new Map();
+const linkedWitches = new Map();
 
 function normalize(text) {
   return text
@@ -84,6 +44,28 @@ function normalize(text) {
     .replace(/[’']/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isLeader(user) {
+  return (
+    user.id === OWNER_ID ||
+    LEADER_USERNAMES.has(user.username.toLowerCase())
+  );
+}
+
+function witchRank(user) {
+  if (isLeader(user)) return "Witch Leader";
+  if (linkedWitches.has(user.id)) return "Linked Witch";
+  if (channelledWitches.has(user.id)) return "Channeled Witch";
+  return null;
+}
+
+function canCast(user) {
+  return witchRank(user) !== null;
+}
+
+function canManageWitches(user) {
+  return isLeader(user) || linkedWitches.has(user.id);
 }
 
 function getSpellText(message) {
@@ -141,10 +123,7 @@ async function sendSpellGif(message, title, gif) {
 
 async function castTimeout(message, target, duration, reason) {
   if (!target) {
-    return reply(
-      message,
-      "Mention a target or reply to their message."
-    );
+    return reply(message, "Mention a target or reply to their message.");
   }
 
   if (
@@ -157,25 +136,48 @@ async function castTimeout(message, target, duration, reason) {
   if (!target.moderatable) {
     return reply(
       message,
-      "I cannot affect that user. Check my **Moderate Members** permission and role hierarchy."
+      "I cannot affect that user. Check my Moderate Members permission and role hierarchy."
     );
   }
 
   try {
     await target.timeout(duration, reason);
-
     return reply(
       message,
       `✨ **${target.user.username}** has been affected by the spell.`
     );
   } catch (error) {
     console.error("Timeout spell failed:", error);
-
-    return reply(
-      message,
-      "The spell failed. Check my **Moderate Members** permission."
-    );
+    return reply(message, "The spell failed. Check my permissions.");
   }
+}
+
+function addChannelled(member) {
+  channelledWitches.set(member.id, {
+    id: member.id,
+    name: member.user.username,
+  });
+  linkedWitches.delete(member.id);
+}
+
+function addLinked(member) {
+  linkedWitches.set(member.id, {
+    id: member.id,
+    name: member.user.username,
+  });
+  channelledWitches.delete(member.id);
+}
+
+function removeWitch(member) {
+  channelledWitches.delete(member.id);
+  linkedWitches.delete(member.id);
+}
+
+function hierarchyList(title, entries) {
+  const names = [...entries.values()].map((witch) => `• ${witch.name}`);
+
+  return names.length ? `**${title}**\n${names.join("\n")}` :
+    `**${title}**\n*None currently recorded.*`;
 }
 
 async function showGrimoire(message) {
@@ -183,23 +185,79 @@ async function showGrimoire(message) {
     .setColor(0x8e44ad)
     .setTitle("📖 The Grimoire")
     .setDescription(
-      "Mention the bot with an incantation to cast it. You must be channelled first."
+      "Mention the bot and use an exact incantation. You must have witch access to cast spells."
     )
     .addFields(
-      SPELLS.map((spell) => ({
-        name: spell.name,
-        value: spell.effect,
-      }))
+      {
+        name: "Silencio",
+        value: "Times out a target for 5 minutes.",
+      },
+      {
+        name: "Pontem Praesido Anchora Immortalibus",
+        value: "Removes a target's timeout.",
+      },
+      {
+        name: "Phasmatos Somnus",
+        value: "Places a target in a 1-minute magical sleep.",
+      },
+      {
+        name: "The Power of Three Will Set Us Free",
+        value: "Bans a target from the server. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Phasmatos Redux Redismo Sus Terra",
+        value: "Kicks a target from the server. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Phasmatos Ravaros",
+        value: "Deletes the message you are replying to. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Phasmatos Devos Male",
+        value: "Unchannels a target and removes their witch access. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Harae Tamae Kioku Yomigaerashi Tamae",
+        value: "Purges up to 50 recent messages from this channel. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Spiritus Immortalitis",
+        value: "Witch Leaders channel themselves.",
+      },
+      {
+        name: "Phasmatos Magicae @user",
+        value: "Channels a user as a Channeled Witch. Linked Witches and Witch Leaders only.",
+      },
+      {
+        name: "Med Dette Suglet Cuem Saluta Novissium @user",
+        value: "Elevates a user to Linked Witch. Witch Leaders only.",
+      },
+      {
+        name: "Phasmatos Ravaros On Animum",
+        value: "Restores a Witch Leader's spell access.",
+      }
+    );
+
+  await message.channel.send({ embeds: [embed] });
+}
+
+async function showHierarchy(message) {
+  const leaders = [...LEADER_USERNAMES].map((name) => `• ${name}`);
+  leaders.unshift("• Bot owner");
+
+  const embed = new EmbedBuilder()
+    .setColor(0x8e44ad)
+    .setTitle("♛ Coven Hierarchy")
+    .setDescription(
+      "**1. Witch Leaders**\n" +
+      leaders.join("\n") +
+      "\n\n" +
+      hierarchyList("2. Linked Witches", linkedWitches) +
+      "\n\n" +
+      hierarchyList("3. Channeled Witches", channelledWitches)
     )
-    .addFields({
-      name: "Channeling",
-      value:
-        "`Spiritus Immortalitis` — channel yourself.\n" +
-        "`Phasmatos Magicae @user` — channel another user.\n" +
-        "`Phasmatos Ravaros On Animum` — restore your own spell access.",
-    })
     .setFooter({
-      text: "Some Discord effects are custom adaptations of magical incantations.",
+      text: "Witch access is stored in memory and resets when the bot restarts.",
     });
 
   await message.channel.send({ embeds: [embed] });
@@ -213,358 +271,268 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    // Every spell must mention the bot.
+    // Ignore messages unless the bot is explicitly mentioned.
     if (!message.mentions.has(client.user)) return;
 
     const spell = getSpellText(message);
-    const isOwner = message.author.id === OWNER_ID;
+    const author = message.author;
+    const leader = isLeader(author);
+    const linked = linkedWitches.has(author.id);
+    const rank = witchRank(author);
 
-    // Channeling commands are owner-only.
-    if (
-      [
-        "SPIRITUS IMMORTALITIS",
-        "PHASMATOS MAGICAE",
-        "PHASMATOS RAVAROS ON ANIMUM",
-      ].includes(spell) &&
-      !isOwner
-    ) {
-      return reply(message, "Only the coven owner can channel users.");
+    const recognizedSpells = new Set([
+      "GRIMOIRE",
+      "HIERARCHY",
+      "COVEN HIERARCHY",
+      "SILENCIO",
+      "PONTEM PRAESIDO ANCHORA IMMORTALIBUS",
+      "PHASMATOS SOMNUS",
+      "THE POWER OF THREE WILL SET US FREE",
+      "PHASMATOS REDUX REDISMO SUS TERRA",
+      "PHASMATOS RAVAROS",
+      "PHASMATOS DEVOS MALE",
+      "HARAE TAMAE KIOKU YOMIGAERASHI TAMAE",
+      "SPIRITUS IMMORTALITIS",
+      "PHASMATOS MAGICAE",
+      "MED DETTE SUGLET CUEM SALUTA NOVISSIUM",
+      "PHASMATOS RAVAROS ON ANIMUM",
+    ]);
+
+    // No replies for ordinary text or unknown incantations.
+    if (!recognizedSpells.has(spell)) return;
+
+    // No spell access means no response.
+    // Channeling and promotion are handled separately below.
+    const channelingSpell = [
+      "SPIRITUS IMMORTALITIS",
+      "PHASMATOS MAGICAE",
+      "MED DETTE SUGLET CUEM SALUTA NOVISSIUM",
+      "PHASMATOS RAVAROS ON ANIMUM",
+    ].includes(spell);
+
+    if (!rank && !channelingSpell) return;
+
+    // Grimoire and hierarchy are available to witch members.
+    if (spell === "GRIMOIRE") {
+      if (!rank) return;
+      return showGrimoire(message);
     }
 
-    if (OWNER_ONLY.has(spell) && !isOwner) {
-      return reply(message, "Only the coven owner can cast that spell.");
+    if (spell === "HIERARCHY" || spell === "COVEN HIERARCHY") {
+      if (!rank) return;
+      return showHierarchy(message);
     }
 
-    // Channel yourself.
+    // Witch Leaders can channel themselves.
     if (spell === "SPIRITUS IMMORTALITIS") {
-      channelledUsers.add(message.author.id);
+      if (!leader) return;
 
-      await sendSpellGif(
-        message,
-        "Spiritus Immortalitis",
-        SPIRIT_GIF
-      );
+      addLinked({
+        id: author.id,
+        user: { username: author.username },
+      });
 
-      return reply(message, "The spirits have answered. You are channelled.");
+      await sendSpellGif(message, "Spiritus Immortalitis", SPIRIT_GIF);
+      return reply(message, "The spirits have answered. You are a Linked Witch.");
     }
 
-    // Channel another user.
+    // Linked Witches and Witch Leaders can channel others as basic witches.
     if (spell === "PHASMATOS MAGICAE") {
+      if (!canManageWitches(author)) return;
+
       const target = await getTargetMember(message);
-
-      if (!target) {
-        return reply(message, "Mention the user you wish to channel.");
+      if (!target || target.user.bot) {
+        return reply(message, "Mention a valid user to channel.");
       }
 
-      if (target.user.bot) {
-        return reply(message, "You cannot channel a bot.");
+      if (isLeader(target.user)) {
+        return reply(message, "Witch Leaders cannot be downgraded.");
       }
 
-      channelledUsers.add(target.id);
+      addChannelled(target);
 
-      await sendSpellGif(
-        message,
-        "Phasmatos Magicae",
-        MAGICAE_GIF
-      );
-
+      await sendSpellGif(message, "Phasmatos Magicae", MAGICAE_GIF);
       return reply(
         message,
-        `✨ **${target.user.username}** has been channelled.`
+        `✨ **${target.user.username}** is now a Channeled Witch.`
       );
     }
 
-    // Restore the owner's spell access.
-    if (spell === "PHASMATOS RAVAROS ON ANIMUM") {
-      channelledUsers.add(message.author.id);
+    // Witch Leaders can elevate someone to Linked Witch.
+    if (spell === "MED DETTE SUGLET CUEM SALUTA NOVISSIUM") {
+      if (!leader) return;
 
-      await sendSpellGif(
+      const target = await getTargetMember(message);
+      if (!target || target.user.bot) {
+        return reply(message, "Mention a valid user to link.");
+      }
+
+      if (isLeader(target.user)) {
+        return reply(message, "That user is already a Witch Leader.");
+      }
+
+      addLinked(target);
+
+      await sendSpellGif(message, "Med Dette Suglet Cuem Saluta Novissium", MAGICAE_GIF);
+      return reply(
         message,
-        "Phasmatos Ravaros On Animum",
-        RAVAROS_GIF
+        `✨ **${target.user.username}** has been elevated to **Linked Witch**. They can now channel other users and use advanced spells.`
       );
+    }
 
+    // Re-channel a Witch Leader after bot restarts.
+    if (spell === "PHASMATOS RAVAROS ON ANIMUM") {
+      if (!leader) return;
+
+      addLinked({
+        id: author.id,
+        user: { username: author.username },
+      });
+
+      await sendSpellGif(message, "Phasmatos Ravaros On Animum", RAVAROS_GIF);
       return reply(message, "Your spell access has been restored.");
     }
 
-    // Only channelled users can cast spells.
-    if (!channelledUsers.has(message.author.id)) {
-      return reply(
-        message,
-        "You have not been channelled. Ask the coven owner to channel you first."
-      );
-    }
+    // All remaining spells require channeling.
+    if (!canCast(author)) return;
 
-    if (spell === "GRIMOIRE") {
-      return showGrimoire(message);
-    }
+    const linkedOnly = new Set([
+      "THE POWER OF THREE WILL SET US FREE",
+      "PHASMATOS REDUX REDISMO SUS TERRA",
+      "PHASMATOS RAVAROS",
+      "PHASMATOS DEVOS MALE",
+      "HARAE TAMAE KIOKU YOMIGAERASHI TAMAE",
+      "PONTEM PRAESIDO ANCHORA IMMORTALIBUS",
+    ]);
+
+    if (linkedOnly.has(spell) && !canManageWitches(author)) return;
 
     // Silencio: 5-minute timeout.
     if (spell === "SILENCIO") {
       const target = await getTargetMember(message);
-
-      return castTimeout(
-        message,
-        target,
-        5 * 60 * 1000,
-        "Silencio"
-      );
+      return castTimeout(message, target, 5 * 60 * 1000, "Silencio");
     }
 
-    // Custom spell: remove timeout.
+    // Remove a timeout.
     if (spell === "PONTEM PRAESIDO ANCHORA IMMORTALIBUS") {
       const target = await getTargetMember(message);
-
-      if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
-      }
-
-      if (
-        target.id === message.author.id ||
-        target.id === client.user.id
-      ) {
+      if (!target) return reply(message, "Mention a target or reply to their message.");
+      if (target.id === author.id || target.id === client.user.id) {
         return reply(message, "Choose another user as your target.");
       }
 
       if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-        return reply(
-          message,
-          "You need **Moderate Members** permission to remove timeouts."
-        );
+        return reply(message, "You need Moderate Members permission.");
       }
 
-      try {
-        await target.timeout(null, "Pontem Praesido Anchora Immortalibus");
-
-        return reply(
-          message,
-          `✨ The timeout on **${target.user.username}** has been lifted.`
-        );
-      } catch (error) {
-        console.error("Timeout removal failed:", error);
-
-        return reply(
-          message,
-          "The spell failed. Check my permissions and role hierarchy."
-        );
-      }
+      await target.timeout(null, "Pontem Praesido Anchora Immortalibus");
+      return reply(message, `✨ The timeout on **${target.user.username}** has been lifted.`);
     }
 
     // Phasmatos Somnus: 1-minute timeout.
     if (spell === "PHASMATOS SOMNUS") {
       const target = await getTargetMember(message);
-
-      return castTimeout(
-        message,
-        target,
-        60 * 1000,
-        "Phasmatos Somnus"
-      );
+      return castTimeout(message, target, 60 * 1000, "Phasmatos Somnus");
     }
 
-    // The Power of Three: ban.
+    // Ban a target.
     if (spell === "THE POWER OF THREE WILL SET US FREE") {
       const target = await getTargetMember(message);
 
-      if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
-      }
-
-      if (
-        target.id === message.author.id ||
-        target.id === client.user.id
-      ) {
+      if (!target) return reply(message, "Mention a target or reply to their message.");
+      if (target.id === author.id || target.id === client.user.id) {
         return reply(message, "You cannot ban yourself or the bot.");
       }
-
       if (!target.bannable) {
-        return reply(
-          message,
-          "I cannot ban that user. Check my **Ban Members** permission and role hierarchy."
-        );
+        return reply(message, "I cannot ban that user. Check my Ban Members permission and role hierarchy.");
       }
 
-      try {
-        await target.ban({
-          reason: "The Power of Three Will Set Us Free",
-        });
-
-        return reply(
-          message,
-          `✨ **${target.user.username}** has been banished by the Power of Three.`
-        );
-      } catch (error) {
-        console.error("Ban spell failed:", error);
-
-        return reply(message, "The ban spell failed. Check my permissions.");
-      }
+      await target.ban({ reason: "The Power of Three Will Set Us Free" });
+      return reply(message, `✨ **${target.user.username}** has been banished by the Power of Three.`);
     }
 
-    // Phasmatos Redux Redismo Sus Terra: kick.
+    // Kick a target.
     if (spell === "PHASMATOS REDUX REDISMO SUS TERRA") {
       const target = await getTargetMember(message);
 
-      if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
-      }
-
-      if (
-        target.id === message.author.id ||
-        target.id === client.user.id
-      ) {
+      if (!target) return reply(message, "Mention a target or reply to their message.");
+      if (target.id === author.id || target.id === client.user.id) {
         return reply(message, "You cannot kick yourself or the bot.");
       }
-
       if (!target.kickable) {
-        return reply(
-          message,
-          "I cannot kick that user. Check my **Kick Members** permission and role hierarchy."
-        );
+        return reply(message, "I cannot kick that user. Check my Kick Members permission and role hierarchy.");
       }
 
-      try {
-        await target.kick("Phasmatos Redux Redismo Sus Terra");
-
-        return reply(
-          message,
-          `✨ **${target.user.username}** has been banished from the server.`
-        );
-      } catch (error) {
-        console.error("Kick spell failed:", error);
-
-        return reply(message, "The kick spell failed. Check my permissions.");
-      }
+      await target.kick("Phasmatos Redux Redismo Sus Terra");
+      return reply(message, `✨ **${target.user.username}** has been banished from the server.`);
     }
 
-    // Phasmatos Ravaros: delete the replied-to message.
+    // Delete the replied-to message.
     if (spell === "PHASMATOS RAVAROS") {
       const replied = await getRepliedMessage(message);
 
-      if (!replied) {
-        return reply(message, "Reply to a message when casting this spell.");
-      }
-
+      if (!replied) return reply(message, "Reply to a message to cast this spell.");
       if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        return reply(
-          message,
-          "You need **Manage Messages** permission to cast this spell."
-        );
+        return reply(message, "You need Manage Messages permission.");
       }
 
-      try {
-        await replied.delete();
-
-        return reply(message, "✨ The targeted message has been banished.");
-      } catch (error) {
-        console.error("Message deletion failed:", error);
-
-        return reply(
-          message,
-          "I could not delete that message. Check my permissions."
-        );
-      }
+      await replied.delete();
+      return reply(message, "✨ The targeted message has been banished.");
     }
 
-    // Phasmatos Devos Male: delete up to five recent messages
-    // from the author of the message being replied to.
+    // Unchannel a target.
     if (spell === "PHASMATOS DEVOS MALE") {
-      const replied = await getRepliedMessage(message);
+      const target = await getTargetMember(message);
 
-      if (!replied) {
-        return reply(message, "Reply to a user's message to cast this spell.");
+      if (!target) return reply(message, "Mention a witch or reply to their message.");
+      if (isLeader(target.user)) {
+        return reply(message, "Witch Leaders cannot be unchannelled.");
       }
 
-      if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        return reply(
-          message,
-          "You need **Manage Messages** permission to cast this spell."
-        );
+      if (!channelledWitches.has(target.id) && !linkedWitches.has(target.id)) {
+        return reply(message, "That user does not currently have witch access.");
       }
 
-      try {
-        const recent = await message.channel.messages.fetch({ limit: 50 });
-
-        const toDelete = recent
-          .filter(
-            (msg) =>
-              msg.author.id === replied.author.id &&
-              !msg.pinned &&
-              Date.now() - msg.createdTimestamp < 14 * 24 * 60 * 60 * 1000
-          )
-          .first(5);
-
-        if (toDelete.length === 0) {
-          return reply(message, "No eligible messages were found.");
-        }
-
-        await message.channel.bulkDelete(toDelete, true);
-
-        return reply(
-          message,
-          `✨ Removed ${toDelete.length} recent message(s) from **${replied.author.username}**.`
-        );
-      } catch (error) {
-        console.error("Message cleanup failed:", error);
-
-        return reply(message, "The spell failed. Check my permissions.");
-      }
+      removeWitch(target);
+      return reply(message, `✨ **${target.user.username}** has been unchannelled and removed from the whitelist.`);
     }
 
-    // Harae Tamae Kioku Yomigaerashi Tamae: purge up to 50 recent messages.
+    // Purge up to 50 recent messages in the current channel.
     if (spell === "HARAE TAMAE KIOKU YOMIGAERASHI TAMAE") {
       if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        return reply(
-          message,
-          "The bot owner must also have **Manage Messages** permission to purge messages."
-        );
+        return reply(message, "You need Manage Messages permission to purge this channel.");
       }
 
-      try {
-        // Fetch the 50 messages before the command itself.
-        const recent = await message.channel.messages.fetch({
-          limit: 50,
-          before: message.id,
-        });
+      const recent = await message.channel.messages.fetch({
+        limit: 50,
+        before: message.id,
+      });
 
-        if (recent.size === 0) {
-          return reply(message, "There are no recent messages to purge.");
-        }
-
-        const deleted = await message.channel.bulkDelete(recent, true);
-
-        return reply(
-          message,
-          `✨ The spell purged **${deleted.size}** recent message(s). Messages older than 14 days cannot be bulk-deleted.`
-        );
-      } catch (error) {
-        console.error("Purge spell failed:", error);
-
-        return reply(
-          message,
-          "The purge failed. Check my **Manage Messages** permission."
-        );
+      if (recent.size === 0) {
+        return reply(message, "There are no recent messages to purge.");
       }
+
+      const deleted = await message.channel.bulkDelete(recent, true);
+      return reply(
+        message,
+        `✨ The spell purged **${deleted.size}** recent message(s). Messages older than 14 days cannot be bulk-deleted.`
+      );
     }
-
-    return reply(
-      message,
-      "That incantation is not in the Grimoire. Cast `Grimoire` to view the available spells."
-    );
   } catch (error) {
     console.error("Spell handler error:", error);
 
+    // Only report errors for a recognised spell the bot attempted to execute.
+    // Ordinary messages and replies never trigger this handler.
     try {
-      await reply(message, "The spell misfired. Check the bot console.");
+      await reply(message, "The spell failed. Check the bot console and permissions.");
     } catch {
-      // The message may no longer be available.
+      // The message may no longer be accessible.
     }
   }
 });
 
 if (!TOKEN) {
-  console.error(
-    "Missing bot token. Set DISCORD_TOKEN or TOKEN in your host environment."
-  );
+  console.error("Missing bot token. Set DISCORD_TOKEN or TOKEN in your host environment.");
   process.exit(1);
 }
 
