@@ -7,6 +7,7 @@ const {
   PermissionFlagsBits,
   SlashCommandBuilder,
   ChannelType,
+  MessageFlags,
 } = require("discord.js");
 
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
@@ -62,7 +63,11 @@ function witchRank(user) {
 }
 
 function canCast(user) {
-  return witchRank(user) !== null;
+  return (
+    isLeader(user) ||
+    linkedWitches.has(user.id) ||
+    channelledWitches.has(user.id)
+  );
 }
 
 function canManageWitches(user) {
@@ -109,7 +114,10 @@ async function getRepliedMessage(message) {
 async function reply(message, content) {
   return message.reply({
     content,
-    allowedMentions: { repliedUser: false },
+    allowedMentions: {
+      parse: [],
+      repliedUser: false,
+    },
   });
 }
 
@@ -124,14 +132,20 @@ async function sendSpellGif(message, title, gif) {
 
 async function castTimeout(message, target, duration, reason) {
   if (!target) {
-    return reply(message, "Mention a target or reply to their message.");
+    return reply(
+      message,
+      "Mention a target or reply to their message."
+    );
   }
 
   if (
     target.id === message.author.id ||
     target.id === client.user.id
   ) {
-    return reply(message, "You cannot cast that spell on yourself or the bot.");
+    return reply(
+      message,
+      "You cannot cast that spell on yourself or the bot."
+    );
   }
 
   if (!target.moderatable) {
@@ -143,13 +157,18 @@ async function castTimeout(message, target, duration, reason) {
 
   try {
     await target.timeout(duration, reason);
+
     return reply(
       message,
       `✨ **${target.user.username}** has been affected by the spell.`
     );
   } catch (error) {
     console.error("Timeout spell failed:", error);
-    return reply(message, "The spell failed. Check my permissions.");
+
+    return reply(
+      message,
+      "The spell failed. Check my permissions."
+    );
   }
 }
 
@@ -158,6 +177,7 @@ function addChannelled(member) {
     id: member.id,
     name: member.user.username,
   });
+
   linkedWitches.delete(member.id);
 }
 
@@ -166,6 +186,7 @@ function addLinked(member) {
     id: member.id,
     name: member.user.username,
   });
+
   channelledWitches.delete(member.id);
 }
 
@@ -175,7 +196,9 @@ function removeWitch(member) {
 }
 
 function hierarchyList(title, entries) {
-  const names = [...entries.values()].map((witch) => `• ${witch.name}`);
+  const names = [...entries.values()].map(
+    (witch) => `• ${witch.name}`
+  );
 
   return names.length
     ? `**${title}**\n${names.join("\n")}`
@@ -216,7 +239,7 @@ async function showGrimoire(message) {
       },
       {
         name: "Phasmatos Devos Male",
-        value: "Unchannels a target and removes their witch access. Linked Witches and Witch Leaders only.",
+        value: "Unchannels a target and removes their witch access. Linked Witches can unchannel Channeled Witches; Witch Leaders can unchannel both ranks.",
       },
       {
         name: "Harae Tamae Kioku Yomigaerashi Tamae",
@@ -244,7 +267,10 @@ async function showGrimoire(message) {
 }
 
 async function showHierarchy(message) {
-  const leaders = [...LEADER_USERNAMES].map((name) => `• ${name}`);
+  const leaders = [...LEADER_USERNAMES].map(
+    (name) => `• ${name}`
+  );
+
   leaders.unshift("• Bot owner");
 
   const embed = new EmbedBuilder()
@@ -252,11 +278,11 @@ async function showHierarchy(message) {
     .setTitle("♛ Coven Hierarchy")
     .setDescription(
       "**1. Witch Leaders**\n" +
-      leaders.join("\n") +
-      "\n\n" +
-      hierarchyList("2. Linked Witches", linkedWitches) +
-      "\n\n" +
-      hierarchyList("3. Channeled Witches", channelledWitches)
+        leaders.join("\n") +
+        "\n\n" +
+        hierarchyList("2. Linked Witches", linkedWitches) +
+        "\n\n" +
+        hierarchyList("3. Channeled Witches", channelledWitches)
     )
     .setFooter({
       text: "Witch access is stored in memory and resets when the bot restarts.",
@@ -266,9 +292,30 @@ async function showHierarchy(message) {
 }
 
 async function registerSayCommand() {
-  const command = new SlashCommandBuilder()
+  const sayCommand = new SlashCommandBuilder()
     .setName("say")
-    .setDescription("Speak through the coven bot.")
+    .setDescription("Speak through the coven bot without pinging.")
+    .addStringOption((option) =>
+      option
+        .setName("message")
+        .setDescription("What should the bot say?")
+        .setRequired(true)
+        .setMaxLength(2000)
+    )
+    .addChannelOption((option) =>
+      option
+        .setName("channel")
+        .setDescription("Channel to send the message to.")
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement
+        )
+        .setRequired(false)
+    );
+
+  const sayPingCommand = new SlashCommandBuilder()
+    .setName("sayping")
+    .setDescription("Send a message that can ping users and roles.")
     .addStringOption((option) =>
       option
         .setName("message")
@@ -288,15 +335,22 @@ async function registerSayCommand() {
     );
 
   const commands = await client.application.commands.fetch();
-  const existing = commands.find((cmd) => cmd.name === "say");
 
-  if (existing) {
-    await existing.edit(command.toJSON());
-  } else {
-    await client.application.commands.create(command.toJSON());
+  for (const command of [sayCommand, sayPingCommand]) {
+    const existing = commands.find(
+      (cmd) => cmd.name === command.name
+    );
+
+    if (existing) {
+      await existing.edit(command.toJSON());
+    } else {
+      await client.application.commands.create(
+        command.toJSON()
+      );
+    }
   }
 
-  console.log("/say command registered.");
+  console.log("/say and /sayping commands registered.");
 }
 
 client.once("ready", async () => {
@@ -305,22 +359,30 @@ client.once("ready", async () => {
   try {
     await registerSayCommand();
   } catch (error) {
-    console.error("Failed to register /say:", error);
+    console.error("Failed to register slash commands:", error);
   }
 });
 
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "say") return;
+
+  if (
+    interaction.commandName !== "say" &&
+    interaction.commandName !== "sayping"
+  ) {
+    return;
+  }
 
   if (interaction.user.id !== OWNER_ID) {
     return interaction.reply({
       content: "You are not authorised to use this command.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
+  const isSayPing = interaction.commandName === "sayping";
   const text = interaction.options.getString("message", true);
+
   const channel =
     interaction.options.getChannel("channel") ||
     interaction.channel;
@@ -332,34 +394,43 @@ client.on("interactionCreate", async (interaction) => {
   ) {
     return interaction.reply({
       content: "That channel cannot receive messages.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
   try {
     await channel.send({
       content: text,
-      allowedMentions: { parse: [] },
+      allowedMentions: isSayPing
+        ? {
+            parse: ["users", "roles", "everyone"],
+          }
+        : {
+            parse: [],
+            repliedUser: false,
+          },
     });
 
     await interaction.reply({
       content: `✨ Your message has been sent to <#${channel.id}>.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
     });
   } catch (error) {
-    console.error("/say failed:", error);
+    console.error(`/${interaction.commandName} failed:`, error);
+
+    const response = {
+      content: "The spell failed. Check my channel permissions.",
+      flags: MessageFlags.Ephemeral,
+    };
 
     if (interaction.replied || interaction.deferred) {
-      return interaction.followUp({
-        content: "The spell failed. Check my channel permissions.",
-        ephemeral: true,
-      });
+      return interaction.followUp(response);
     }
 
-    return interaction.reply({
-      content: "The spell failed. Check my channel permissions.",
-      ephemeral: true,
-    });
+    return interaction.reply(response);
   }
 });
 
@@ -403,12 +474,15 @@ client.on("messageCreate", async (message) => {
     if (!rank && !channelingSpell) return;
 
     if (spell === "GRIMOIRE") {
-      if (!rank) return;
+      if (!canCast(author)) return;
       return showGrimoire(message);
     }
 
-    if (spell === "HIERARCHY" || spell === "COVEN HIERARCHY") {
-      if (!rank) return;
+    if (
+      spell === "HIERARCHY" ||
+      spell === "COVEN HIERARCHY"
+    ) {
+      if (!canCast(author)) return;
       return showHierarchy(message);
     }
 
@@ -420,8 +494,16 @@ client.on("messageCreate", async (message) => {
         user: { username: author.username },
       });
 
-      await sendSpellGif(message, "Spiritus Immortalitis", SPIRIT_GIF);
-      return reply(message, "The spirits have answered. You are a Linked Witch.");
+      await sendSpellGif(
+        message,
+        "Spiritus Immortalitis",
+        SPIRIT_GIF
+      );
+
+      return reply(
+        message,
+        "The spirits have answered. You are a Linked Witch."
+      );
     }
 
     if (spell === "PHASMATOS MAGICAE") {
@@ -438,7 +520,12 @@ client.on("messageCreate", async (message) => {
       }
 
       addChannelled(target);
-      await sendSpellGif(message, "Phasmatos Magicae", MAGICAE_GIF);
+
+      await sendSpellGif(
+        message,
+        "Phasmatos Magicae",
+        MAGICAE_GIF
+      );
 
       return reply(
         message,
@@ -487,7 +574,10 @@ client.on("messageCreate", async (message) => {
         RAVAROS_GIF
       );
 
-      return reply(message, "Your spell access has been restored.");
+      return reply(
+        message,
+        "Your spell access has been restored."
+      );
     }
 
     if (!canCast(author)) return;
@@ -501,49 +591,100 @@ client.on("messageCreate", async (message) => {
       "PONTEM PRAESIDO ANCHORA IMMORTALIBUS",
     ]);
 
-    if (linkedOnly.has(spell) && !canManageWitches(author)) return;
+    if (
+      linkedOnly.has(spell) &&
+      !canManageWitches(author)
+    ) {
+      return reply(
+        message,
+        "You need to be a Linked Witch or Witch Leader to cast this spell."
+      );
+    }
 
     if (spell === "SILENCIO") {
       const target = await getTargetMember(message);
-      return castTimeout(message, target, 5 * 60 * 1000, "Silencio");
+
+      return castTimeout(
+        message,
+        target,
+        5 * 60 * 1000,
+        "Silencio"
+      );
     }
 
     if (spell === "PONTEM PRAESIDO ANCHORA IMMORTALIBUS") {
       const target = await getTargetMember(message);
 
       if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
+        return reply(
+          message,
+          "Mention a target or reply to their message."
+        );
       }
 
-      if (target.id === author.id || target.id === client.user.id) {
+      if (
+        target.id === author.id ||
+        target.id === client.user.id
+      ) {
         return reply(message, "Choose another user as your target.");
       }
 
-      if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-        return reply(message, "You need Moderate Members permission.");
+      if (
+        !message.member.permissions.has(
+          PermissionFlagsBits.ModerateMembers
+        )
+      ) {
+        return reply(
+          message,
+          "You need Moderate Members permission."
+        );
       }
 
-      await target.timeout(null, "Pontem Praesido Anchora Immortalibus");
+      try {
+        await target.timeout(
+          null,
+          "Pontem Praesido Anchora Immortalibus"
+        );
 
-      return reply(
-        message,
-        `✨ The timeout on **${target.user.username}** has been lifted.`
-      );
+        return reply(
+          message,
+          `✨ The timeout on **${target.user.username}** has been lifted.`
+        );
+      } catch (error) {
+        console.error("Timeout removal failed:", error);
+
+        return reply(
+          message,
+          "The spell failed. Check my permissions and role hierarchy."
+        );
+      }
     }
 
     if (spell === "PHASMATOS SOMNUS") {
       const target = await getTargetMember(message);
-      return castTimeout(message, target, 60 * 1000, "Phasmatos Somnus");
+
+      return castTimeout(
+        message,
+        target,
+        60 * 1000,
+        "Phasmatos Somnus"
+      );
     }
 
     if (spell === "THE POWER OF THREE WILL SET US FREE") {
       const target = await getTargetMember(message);
 
       if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
+        return reply(
+          message,
+          "Mention a target or reply to their message."
+        );
       }
 
-      if (target.id === author.id || target.id === client.user.id) {
+      if (
+        target.id === author.id ||
+        target.id === client.user.id
+      ) {
         return reply(message, "You cannot ban yourself or the bot.");
       }
 
@@ -554,24 +695,39 @@ client.on("messageCreate", async (message) => {
         );
       }
 
-      await target.ban({
-        reason: "The Power of Three Will Set Us Free",
-      });
+      try {
+        await target.ban({
+          reason: "The Power of Three Will Set Us Free",
+        });
 
-      return reply(
-        message,
-        `✨ **${target.user.username}** has been banished by the Power of Three.`
-      );
+        return reply(
+          message,
+          `✨ **${target.user.username}** has been banished by the Power of Three.`
+        );
+      } catch (error) {
+        console.error("Ban spell failed:", error);
+
+        return reply(
+          message,
+          "The spell failed. Check my permissions."
+        );
+      }
     }
 
     if (spell === "PHASMATOS REDUX REDISMO SUS TERRA") {
       const target = await getTargetMember(message);
 
       if (!target) {
-        return reply(message, "Mention a target or reply to their message.");
+        return reply(
+          message,
+          "Mention a target or reply to their message."
+        );
       }
 
-      if (target.id === author.id || target.id === client.user.id) {
+      if (
+        target.id === author.id ||
+        target.id === client.user.id
+      ) {
         return reply(message, "You cannot kick yourself or the bot.");
       }
 
@@ -582,38 +738,69 @@ client.on("messageCreate", async (message) => {
         );
       }
 
-      await target.kick("Phasmatos Redux Redismo Sus Terra");
+      try {
+        await target.kick(
+          "Phasmatos Redux Redismo Sus Terra"
+        );
 
-      return reply(
-        message,
-        `✨ **${target.user.username}** has been banished from the server.`
-      );
+        return reply(
+          message,
+          `✨ **${target.user.username}** has been banished from the server.`
+        );
+      } catch (error) {
+        console.error("Kick spell failed:", error);
+
+        return reply(
+          message,
+          "The spell failed. Check my permissions."
+        );
+      }
     }
 
     if (spell === "PHASMATOS RAVAROS") {
       const replied = await getRepliedMessage(message);
 
       if (!replied) {
-        return reply(message, "Reply to a message to cast this spell.");
+        return reply(
+          message,
+          "Reply to a message to cast this spell."
+        );
       }
 
-      if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        return reply(message, "You need Manage Messages permission.");
+      if (
+        !message.member.permissions.has(
+          PermissionFlagsBits.ManageMessages
+        )
+      ) {
+        return reply(
+          message,
+          "You need Manage Messages permission."
+        );
       }
 
       await replied.delete();
-      return reply(message, "✨ The targeted message has been banished.");
+
+      return reply(
+        message,
+        "✨ The targeted message has been banished."
+      );
     }
 
     if (spell === "PHASMATOS DEVOS MALE") {
       const target = await getTargetMember(message);
 
       if (!target) {
-        return reply(message, "Mention a witch or reply to their message.");
+        return reply(
+          message,
+          "Mention a witch or reply to their message."
+        );
       }
 
       if (isLeader(target.user)) {
-        return reply(message, "Witch Leaders cannot be unchannelled.");
+        return reply(
+          message,
+          "Witch Leaders cannot be unchannelled."
+        );
       }
 
       if (
@@ -626,6 +813,16 @@ client.on("messageCreate", async (message) => {
         );
       }
 
+      if (
+        linkedWitches.has(target.id) &&
+        !leader
+      ) {
+        return reply(
+          message,
+          "Only Witch Leaders can unchannel a Linked Witch."
+        );
+      }
+
       removeWitch(target);
 
       return reply(
@@ -635,7 +832,11 @@ client.on("messageCreate", async (message) => {
     }
 
     if (spell === "HARAE TAMAE KIOKU YOMIGAERASHI TAMAE") {
-      if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+      if (
+        !message.member.permissions.has(
+          PermissionFlagsBits.ManageMessages
+        )
+      ) {
         return reply(
           message,
           "You need Manage Messages permission to purge this channel."
@@ -648,10 +849,16 @@ client.on("messageCreate", async (message) => {
       });
 
       if (recent.size === 0) {
-        return reply(message, "There are no recent messages to purge.");
+        return reply(
+          message,
+          "There are no recent messages to purge."
+        );
       }
 
-      const deleted = await message.channel.bulkDelete(recent, true);
+      const deleted = await message.channel.bulkDelete(
+        recent,
+        true
+      );
 
       return reply(
         message,
@@ -666,8 +873,7 @@ client.on("messageCreate", async (message) => {
         message,
         "The spell failed. Check the bot console and permissions."
       );
-    } catch {
-    }
+    } catch {}
   }
 });
 
@@ -675,6 +881,7 @@ if (!TOKEN) {
   console.error(
     "Missing bot token. Set DISCORD_TOKEN or TOKEN in your host environment."
   );
+
   process.exit(1);
 }
 
